@@ -211,6 +211,52 @@ DQN for poker has a fundamental ceiling. It doesn't model the opponent, doesn't 
 
 ---
 
+## Chapter 6: The Right Tool for Hidden Information
+
+The honest ceiling at the end of Chapter 5 wasn't a dead end — it was a diagnosis. DQN's problem isn't something you fix with more hands or better hyperparameters. It's structural.
+
+DQN was designed for games where the agent sees the full state. In Atari, the pixels on screen are everything. In poker, they're not. Your opponent's hole cards are hidden, which means the same observable state — same board, same pot, same position — can lead to opposite correct decisions depending on what they're holding. DQN can't represent that uncertainty. It assigns one Q-value to each action in each observed state and optimizes it, which works fine when the state is complete and falls apart when it isn't.
+
+### Taking Stock of the Options
+
+RLCard ships four learning algorithms. Before committing to a direction, it was worth understanding what each one actually does and what it costs:
+
+**Deep Monte-Carlo (DMC)** samples full game trajectories and trains a network on average outcomes. Simple, no game tree required, scales reasonably to multi-player. Good empirical results in RLCard's own benchmarks.
+
+**Deep Q-Learning (DQN)** — where we are now. Learns Q-values, epsilon-greedy exploration, single network. Fast to train, easy to understand, but fundamentally unsuited to imperfect information without modification.
+
+**Neural Fictitious Self-Play (NFSP)** layers game theory on top of DQN. The agent maintains two policies simultaneously: a best-response network (RL, like DQN) and an average strategy network (supervised). The average strategy is what converges — over many iterations, it approaches Nash equilibrium. Specifically designed for imperfect information games. Compute cost is roughly 2x DQN.
+
+**Counterfactual Regret Minimization (CFR)** is the gold standard — the algorithm behind Libratus and Pluribus. It iteratively minimizes regret (the gap between what you did and what you should have done) and provably converges to Nash equilibrium. The catch: vanilla CFR doesn't scale to No-Limit Hold'em. Production CFR systems require game abstraction, which is a research problem in its own right. Without access to a high-performance compute cluster, CFR at meaningful scale is not realistic.
+
+### The Format Problem
+
+There's another unknown: the competition format. If the final evaluation is heads-up (1v1), NFSP's convergence guarantees apply directly — it's designed for two-player zero-sum games. If it's a pool of bots (3-6 players), Nash equilibrium becomes ill-defined; the better choice there is DMC, which doesn't rely on two-player theory and scales naturally.
+
+With the format uncertain, NFSP is the safer bet. It handles 1v1 well by construction, and in a multi-player pool it will still learn solid poker — just without the theoretical guarantees. If the format clarifies as multi-player, the switch to DMC is a one-file change.
+
+### How NFSP Actually Works
+
+Every hand, the agent flips a biased coin. With probability η (typically 0.1), it plays its **best-response policy** — acting greedily to maximize chip gain against the current opponent. With probability 1−η, it plays its **average policy** — sampling from the distribution it has averaged over all its past best-response decisions.
+
+The best-response policy is trained with RL (off-policy, like DQN) on a standard replay buffer. The average policy is trained with supervised learning on a reservoir buffer that stores every action the agent took while in best-response mode.
+
+The result: the average policy is always "what would I do if I had to commit to one mixed strategy that covers all the ways I've played?" Over time, this converges to Nash equilibrium. An opponent can't exploit it because there's no fixed pattern to exploit.
+
+### The Training Design
+
+The new training loop (`train_nfsp.py`) uses two NFSP agents — `nfsp0` (the agent we care about) and `nfsp1` (its sparring partner) — and runs them through two phases:
+
+**Phase 1 — 10,000 hands vs RandomAgent (warm-up)**
+Two untrained agents playing each other from random weights can be slow to develop meaningful poker. A brief warm-up against a random opponent gives `nfsp0` a clear gradient signal to learn basic hand strength before self-play begins. Phase 1 is short — 10k hands, not the 100k we used for DQN curriculum — because NFSP self-play generates signal far more efficiently.
+
+**Phase 2 — 200,000 hands of self-play**
+Both agents train against each other. Every hand, both `nfsp0` and `nfsp1` get their transitions fed and their networks updated. The opponent keeps getting stronger as `nfsp0` does, which is the point — self-play is a natural curriculum where the difficulty scales with your ability.
+
+The `PokerBotAgent` is no longer a training target. It becomes a benchmark: every 5,000 hands, we pause and measure `nfsp0`'s average payoff against it. A positive trend there is a signal that the agent is developing real poker intuition, not just learning to beat its own mirror image.
+
+---
+
 ## References
 
 [1] Zha, D., Lai, K. H., Cao, Y., Huang, S., Wei, R., Guo, J., & Hu, X. (2019). RLCard: A Toolkit for Reinforcement Learning in Card Games. *Proceedings of the Twenty-Ninth International Joint Conference on Artificial Intelligence (IJCAI-20)*. <https://github.com/datamllab/rlcard>
