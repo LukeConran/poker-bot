@@ -13,6 +13,7 @@ import sys
 import rlcard
 from rlcard.agents import NFSPAgent
 from rlcard.utils import set_seed
+from rlcard_agent import PokerBotAgent
 
 DEFAULT_CHECKPOINT = os.path.join("results", "nfsp_checkpoints", "nfsp_final.pt")
 
@@ -104,7 +105,7 @@ def make_nfsp(env) -> NFSPAgent:
     return NFSPAgent(
         num_actions=env.num_actions,
         state_shape=env.state_shape[0],
-        hidden_layers_sizes=[64, 64],
+        hidden_layers_sizes=[128, 128],
         reservoir_buffer_capacity=20000,
         anticipatory_param=0.1,
         batch_size=256,
@@ -118,7 +119,7 @@ def make_nfsp(env) -> NFSPAgent:
         q_epsilon_decay_steps=1,     # inference only — decay irrelevant
         q_batch_size=32,
         q_train_every=1,
-        q_mlp_layers=[64, 64],
+        q_mlp_layers=[128, 128],
         rl_learning_rate=5e-4,
         evaluate_with="average_policy",
     )
@@ -142,33 +143,36 @@ def load_bot(env, checkpoint_path: str) -> NFSPAgent:
 ACTION_INT_NAMES = {0: "FOLD", 1: "CHECK_CALL", 2: "RAISE_HALF_POT", 3: "RAISE_POT", 4: "ALL_IN"}
 
 
-def _describe_bot_action(state: dict, action_int: int) -> str:
-    raw     = state.get("raw_obs", {})
+def _describe_bot_action(state: dict, action_name: str) -> str:
+    raw       = state.get("raw_obs", {})
     all_chips = raw.get("all_chips", [0, 0])
     my_chips  = raw.get("my_chips", 0)
     pot       = int(raw.get("pot", sum(all_chips)))
     to_call   = max(all_chips) - my_chips
-    name      = ACTION_INT_NAMES.get(action_int, str(action_int))
 
-    if name == "FOLD":
+    if action_name == "FOLD":
         return "Bot folds"
-    if name == "CHECK_CALL":
+    if action_name == "CHECK_CALL":
         return "Bot checks" if to_call == 0 else f"Bot calls {to_call}"
-    if name == "RAISE_HALF_POT":
+    if action_name == "RAISE_HALF_POT":
         return f"Bot raises {max(1, pot // 2)} chips (half pot)"
-    if name == "RAISE_POT":
+    if action_name == "RAISE_POT":
         return f"Bot raises {pot} chips (pot)"
-    if name == "ALL_IN":
+    if action_name == "ALL_IN":
         stakes = raw.get("stakes", [])
         amount = int(stakes[1]) if len(stakes) > 1 else "?"
         return f"Bot goes all-in ({amount} chips)"
-    return f"Bot: {name}"
+    return f"Bot: {action_name}"
 
 
-def play_hand(env, human, nfsp) -> tuple:
-    """Step through one hand manually. Returns (human_payoff, bot_hole_cards, final_board)."""
+def play_hand(env, human, bot, raw_bot: bool = False) -> tuple:
+    """Step through one hand manually. Returns (human_payoff, bot_hole_cards, final_board).
+
+    raw_bot=True  → bot returns raw Action enums (PokerBotAgent)
+    raw_bot=False → bot returns integer action IDs (NFSPAgent)
+    """
     state, player_id = env.reset()
-    bot_hand   = []
+    bot_hand    = []
     final_board = []
 
     while not env.is_over():
@@ -183,14 +187,24 @@ def play_hand(env, human, nfsp) -> tuple:
         else:  # bot
             if not bot_hand:
                 bot_hand = raw.get("hand", [])
-            action, _ = nfsp.eval_step(state)
-            # Never fold for free — override to check if there's nothing to call
+            action, _ = bot.eval_step(state)
+
+            # Resolve action name regardless of type (enum vs int)
+            action_name = action.name if raw_bot else ACTION_INT_NAMES.get(action, str(action))
+
+            # Never fold for free
             all_chips = raw.get("all_chips", [0, 0])
             to_call   = max(all_chips) - raw.get("my_chips", 0)
-            if ACTION_INT_NAMES.get(action) == "FOLD" and to_call == 0:
-                action = next(k for k, v in ACTION_INT_NAMES.items() if v == "CHECK_CALL")
-            print(f"\n  → {_describe_bot_action(state, action)}")
-            state, player_id = env.step(action, raw_action=False)
+            if action_name == "FOLD" and to_call == 0:
+                action_name = "CHECK_CALL"
+                if raw_bot:
+                    legal  = list(state["raw_legal_actions"])
+                    action = next(a for a in legal if a.name == "CHECK_CALL")
+                else:
+                    action = next(k for k, v in ACTION_INT_NAMES.items() if v == "CHECK_CALL")
+
+            print(f"\n  → {_describe_bot_action(state, action_name)}")
+            state, player_id = env.step(action, raw_action=raw_bot)
 
         # Capture board from the state returned after stepping —
         # critical for all-in runouts where RLCard deals remaining
@@ -218,36 +232,45 @@ def main():
     parser.add_argument("--checkpoint", default=DEFAULT_CHECKPOINT)
     parser.add_argument("--chips", type=int, default=SESSION_CHIPS,
                         help="Starting chip stack (default: 100)")
+    parser.add_argument("--bot", choices=["nfsp", "prob"], default="nfsp",
+                        help="Bot to play against: nfsp (trained neural net) or prob (Monte Carlo equity)")
     args = parser.parse_args()
 
     set_seed(0)
 
-    # Load bot using a temporary env just for its num_actions / state_shape
     tmp_env = make_env(args.chips)
-    human = HumanAgent(num_actions=tmp_env.num_actions)
-    nfsp  = load_bot(tmp_env, args.checkpoint)
+    human   = HumanAgent(num_actions=tmp_env.num_actions)
 
-    you = float(args.chips)
-    bot = float(args.chips)
-    total = 0
+    if args.bot == "prob":
+        bot      = PokerBotAgent()
+        raw_bot  = True
+        bot_name = "Probability Bot (Monte Carlo equity)"
+    else:
+        bot      = load_bot(tmp_env, args.checkpoint)
+        raw_bot  = False
+        bot_name = "NFSP Bot"
 
-    print(f"  No-Limit Hold'em vs NFSP Bot")
-    print(f"  Session starts: You {int(you)} — Bot {int(bot)}")
+    you        = float(args.chips)
+    bot_chips  = float(args.chips)
+    total      = 0
+
+    print(f"  No-Limit Hold'em vs {bot_name}")
+    print(f"  Session starts: You {int(you)} — Bot {int(bot_chips)}")
     print(f"  First to bust loses. Good luck.")
     print(f"  Actions: [F]old  [C]heck/Call  [H]alf-pot  [P]ot  [A]ll-in\n")
 
-    while you > 0 and bot > 0:
+    while you > 0 and bot_chips > 0:
         # Use the smaller stack as the effective stack so neither player
         # can bet more than they have in the session.
-        effective = int(min(you, bot))
+        effective = int(min(you, bot_chips))
         env = make_env(effective)
-        env.set_agents([human, nfsp])
+        env.set_agents([human, bot])
 
         human.session_chips = you
-        payoff, bot_hand, final_board = play_hand(env, human, nfsp)
+        payoff, bot_hand, final_board = play_hand(env, human, bot, raw_bot=raw_bot)
         total += 1
-        you += payoff
-        bot -= payoff
+        you       += payoff
+        bot_chips -= payoff
 
         if payoff > 0:
             result = f"You won  +{int(payoff)} chips"
@@ -261,13 +284,13 @@ def main():
         print(f"  │  Board      : {fmt_hand(final_board) if final_board else '(folded preflop)'}")
         print(f"  │  Bot's hand : {fmt_hand(bot_hand)}")
         print(f"  │  {result}")
-        print(f"  │  You: {int(you):<8}  Bot: {int(bot):<8}  Hand #{total}")
+        print(f"  │  You: {int(you):<8}  Bot: {int(bot_chips):<8}  Hand #{total}")
         print("  └─────────────────────────────────────────┘")
 
         if you <= 0:
             print("\n  You're out of chips. The bot wins the session.")
             break
-        if bot <= 0:
+        if bot_chips <= 0:
             print("\n  Bot is out of chips. You win the session!")
             break
 

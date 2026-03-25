@@ -32,22 +32,22 @@ CHECKPOINT_DIR = os.path.join(RESULTS_DIR, "nfsp_checkpoints")
 SEED           = 42
 
 # Phase 1: brief warm-up vs random — just enough to learn basic hand strength
-PHASE1_HANDS   = 10000
+PHASE1_HANDS   = 10_000
 
 # Phase 2: self-play — the main training regime
 PHASE2_HANDS   = 1_000_000
 
-EVAL_EVERY     = 25000  # evaluate every N hands within each phase
-EVAL_HANDS     = 1000   # hands per evaluation episode
-SAVE_EVERY     = 50000  # checkpoint every N hands
+EVAL_EVERY     = 10_000  # evaluate every N hands within each phase
+EVAL_HANDS     = 1000    # hands per evaluation episode
+SAVE_EVERY     = 50_000  # checkpoint every N hands
 
 
 def make_nfsp(env, total_hands: int) -> NFSPAgent:
     return NFSPAgent(
         num_actions=env.num_actions,
         state_shape=env.state_shape[0],
-        hidden_layers_sizes=[64, 64],
-        reservoir_buffer_capacity=20000,
+        hidden_layers_sizes=[128, 128],
+        reservoir_buffer_capacity=200_000,
         anticipatory_param=0.1,          # 10% best-response, 90% avg policy
         batch_size=256,
         train_every=1,
@@ -60,7 +60,7 @@ def make_nfsp(env, total_hands: int) -> NFSPAgent:
         q_epsilon_decay_steps=total_hands * 3,
         q_batch_size=32,
         q_train_every=1,
-        q_mlp_layers=[64, 64],
+        q_mlp_layers=[128, 128],
         rl_learning_rate=5e-4,
         evaluate_with="average_policy",  # use avg policy at eval time (unexploitable)
     )
@@ -130,6 +130,12 @@ def train_phase(
         if hand_num % EVAL_EVERY == 0:
             avg = evaluate(eval_env, nfsp0, PokerBotAgent())
             elapsed = time.time() - start
+            hand_log.append({
+                "phase": phase,
+                "hand": hand_num,
+                "eval_vs_pokerbot": avg,
+                "elapsed": elapsed,
+            })
             print(
                 f"  Hand {hand_num:>{len(str(num_hands))}} | "
                 f"avg payoff vs PokerBot ({EVAL_HANDS} hands): {avg:+.4f} | "
@@ -171,10 +177,11 @@ def run():
         json.dump(hand_log, f, indent=2)
 
     # Summary
-    total = len(hand_log)
-    wins  = sum(1 for h in hand_log if h["payoffs"][0] > 0)
+    train_hands = [h for h in hand_log if "payoffs" in h]
+    total = len(train_hands)
+    wins  = sum(1 for h in train_hands if h["payoffs"][0] > 0)
     print(f"\n--- Summary ({total} total hands) ---")
-    print(f"Overall win rate : {wins / total:.1%}")
+    print(f"Overall win rate : {wins / total:.1%}" if total else "No training hands logged.")
     print(f"Final checkpoint : {CHECKPOINT_DIR}/nfsp_final.pt")
     print(f"Hand log         : {log_path}")
 

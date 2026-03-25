@@ -257,6 +257,38 @@ The `PokerBotAgent` is no longer a training target. It becomes a benchmark: ever
 
 ---
 
+## Chapter 7: Debugging the Flat Line
+
+After 100,000 self-play hands the eval curve barely moved. The bot was losing roughly 4 chips per hand to the probability agent at checkpoint 10k, and still losing roughly 4 chips per hand at checkpoint 100k. No trend.
+
+### Reading the Data Wrong
+
+The first thing to check: were we even measuring the right thing?
+
+The `hand_log.json` we'd been graphing recorded *training* payoffs — the outcomes of `nfsp0` vs `nfsp1` during self-play. In symmetric self-play these will always hover around zero. Both agents are identical architectures learning from each other; neither has a persistent edge. A flat line at zero isn't a sign that nothing is working — it's exactly what you'd expect. It's the wrong metric.
+
+The eval payoffs (nfsp0 vs PokerBotAgent, measured every N hands) were only printed to stdout and then lost. We added them to the log.
+
+### The Reservoir Was Never Full
+
+The more important finding: `reservoir_buffer_capacity` was set to 20,000, but we were only running 100,000 phase 2 hands. The reservoir stores every action the agent takes while in best-response mode — it's the training data for the average policy network. With a 200k capacity and 100k hands, the buffer never filled. The supervised learning network was training on a thin, undiverse slice of experience. It hadn't seen enough of the game to build a stable average strategy.
+
+Fix: increased `reservoir_buffer_capacity` to 200,000 and scaled up to 1,000,000 phase 2 hands so the buffer fills and turns over meaningfully.
+
+### The Network Was Too Small
+
+`[64, 64]` hidden layers may be sufficient for Leduc Hold'em — a toy 6-card game with one round of betting. No-Limit Texas Hold'em has a vastly larger state space: 52 cards, multi-street action, variable stack depths, pot geometry. The network needs more capacity to represent the relevant distinctions.
+
+Both the supervised (average policy) and RL (best-response) networks were upgraded to `[128, 128]`.
+
+### The Short Run as Diagnostic
+
+Before committing to a million-hand overnight run, a 100k-hand test confirmed the shape of the problem: eval scores ranged from -3 to -5.8 with no upward trend, but a faint signal in the noise — the three best eval points (30k, 60k, 90k hands) showed slightly lower losses than the rest. Not enough to call it learning, but enough to confirm the gradient exists.
+
+With the buffer fix, bigger network, and 1M hands, the overnight run should give the average policy network enough data to actually converge.
+
+---
+
 ## References
 
 [1] Zha, D., Lai, K. H., Cao, Y., Huang, S., Wei, R., Guo, J., & Hu, X. (2019). RLCard: A Toolkit for Reinforcement Learning in Card Games. *Proceedings of the Twenty-Ninth International Joint Conference on Artificial Intelligence (IJCAI-20)*. <https://github.com/datamllab/rlcard>
