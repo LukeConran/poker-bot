@@ -1,3 +1,4 @@
 treys
 pytest
 rlcard
+torch
