@@ -44,7 +44,7 @@ The average strategy converges toward Nash equilibrium in two-player zero-sum ga
 ```bash
 python -m venv .venv
 source .venv/bin/activate
-pip install rlcard torch treys
+pip install -r requirements.txt
 ```
 
 ## Training
@@ -62,14 +62,12 @@ Training runs in two phases:
 
 Checkpoints are saved to `results/nfsp_checkpoints/` every 50,000 hands. Evaluation (avg payoff vs the probability bot) is printed every 25,000 hands.
 
-On a laptop CPU, expect roughly 100–200 hands/second — a 1M-hand run takes 2–3 hours.
-
 ## Playing Against the Bot
 
 ```bash
 python play.py
-python play.py --checkpoint results/nfsp_checkpoints/nfsp_phase2_500000.pt
-python play.py --chips 200
+python play.py --bot nfsp --checkpoint results/nfsp_checkpoints/nfsp_phase2_500000.pt
+python play.py --bot prob
 ```
 
 Each session starts with equal stacks. The env is recreated each hand with the correct effective stack so neither player can bet more than they have. Play continues until someone busts or you quit.
@@ -84,16 +82,6 @@ Each session starts with equal stacks. The env is recreated each hand with the c
 | P | Raise pot |
 | A | All-in |
 
-## Algorithm Comparison
-
-| Algorithm | Nash convergence | Compute | Notes |
-|-----------|-----------------|---------|-------|
-| DQN | No | Low | Struggles with hidden information |
-| NFSP | Yes (2-player) | Low–Medium | Current approach |
-| DMC | No | Medium | Better for multi-player pools |
-| CFR | Yes | Very high | Requires game abstraction at scale |
-
 ## References
 
 - Zha et al. (2019). *RLCard: A Toolkit for Reinforcement Learning in Card Games.* IJCAI-20. <https://github.com/datamllab/rlcard>
-- Heinrich & Silver (2016). *Deep Reinforcement Learning from Self-Play in Imperfect-Information Games.* arXiv:1603.01121
